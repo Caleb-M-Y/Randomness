@@ -27,17 +27,126 @@ Implemented so far:
 - Pawn promotion
 
 Coming next:
-- Better notation formatting
-- Graphical interface (pygame)
 - AI opponent
+Future polish:
+- Stronger notation export (PGN formatting)
 """
 
 from dataclasses import dataclass
+import copy
+import random
 
 
 BOARD_SIZE = 8
 FILES = "abcdefgh"
 RANKS = "12345678"
+
+PIECE_VALUES = {
+	"P": 100,
+	"N": 320,
+	"B": 330,
+	"R": 500,
+	"Q": 900,
+	"K": 0,
+}
+
+CHECKMATE_SCORE = 100000
+
+# Heuristic weights for static evaluation.
+MOBILITY_WEIGHT = 3
+IN_CHECK_PENALTY = 40
+CASTLED_BONUS = 35
+CASTLING_RIGHT_BONUS = 10
+PAWN_SHIELD_BONUS = 12
+
+# Tactical evaluation constants.
+PASSED_PAWN_BONUS = 50
+DOUBLED_PAWN_PENALTY = 20
+ISO_PAWN_PENALTY = 15
+BISHOP_PAIR_BONUS = 30
+ROOK_OPEN_FILE_BONUS = 15
+
+# Game phase interpolation: 1.0 means opening/middlegame, 0.0 means endgame.
+MAX_NON_PAWN_MATERIAL = 6400
+
+# Piece-square tables are indexed from White's perspective.
+# For Black pieces, rows are mirrored during lookup.
+PIECE_SQUARE_TABLES: dict[str, list[list[int]]] = {
+	"P": [
+		[0, 0, 0, 0, 0, 0, 0, 0],
+		[50, 50, 50, 50, 50, 50, 50, 50],
+		[10, 10, 20, 30, 30, 20, 10, 10],
+		[5, 5, 10, 25, 25, 10, 5, 5],
+		[0, 0, 0, 20, 20, 0, 0, 0],
+		[5, -5, -10, 0, 0, -10, -5, 5],
+		[5, 10, 10, -20, -20, 10, 10, 5],
+		[0, 0, 0, 0, 0, 0, 0, 0],
+	],
+	"N": [
+		[-50, -40, -30, -30, -30, -30, -40, -50],
+		[-40, -20, 0, 0, 0, 0, -20, -40],
+		[-30, 0, 10, 15, 15, 10, 0, -30],
+		[-30, 5, 15, 20, 20, 15, 5, -30],
+		[-30, 0, 15, 20, 20, 15, 0, -30],
+		[-30, 5, 10, 15, 15, 10, 5, -30],
+		[-40, -20, 0, 5, 5, 0, -20, -40],
+		[-50, -40, -30, -30, -30, -30, -40, -50],
+	],
+	"B": [
+		[-20, -10, -10, -10, -10, -10, -10, -20],
+		[-10, 0, 0, 0, 0, 0, 0, -10],
+		[-10, 0, 5, 10, 10, 5, 0, -10],
+		[-10, 5, 5, 10, 10, 5, 5, -10],
+		[-10, 0, 10, 10, 10, 10, 0, -10],
+		[-10, 10, 10, 10, 10, 10, 10, -10],
+		[-10, 5, 0, 0, 0, 0, 5, -10],
+		[-20, -10, -10, -10, -10, -10, -10, -20],
+	],
+	"R": [
+		[0, 0, 0, 0, 0, 0, 0, 0],
+		[5, 10, 10, 10, 10, 10, 10, 5],
+		[-5, 0, 0, 0, 0, 0, 0, -5],
+		[-5, 0, 0, 0, 0, 0, 0, -5],
+		[-5, 0, 0, 0, 0, 0, 0, -5],
+		[-5, 0, 0, 0, 0, 0, 0, -5],
+		[-5, 0, 0, 0, 0, 0, 0, -5],
+		[0, 0, 0, 5, 5, 0, 0, 0],
+	],
+	"Q": [
+		[-20, -10, -10, -5, -5, -10, -10, -20],
+		[-10, 0, 0, 0, 0, 0, 0, -10],
+		[-10, 0, 5, 5, 5, 5, 0, -10],
+		[-5, 0, 5, 5, 5, 5, 0, -5],
+		[0, 0, 5, 5, 5, 5, 0, -5],
+		[-10, 5, 5, 5, 5, 5, 0, -10],
+		[-10, 0, 5, 0, 0, 0, 0, -10],
+		[-20, -10, -10, -5, -5, -10, -10, -20],
+	],
+}
+
+# King table for opening/middlegame: prioritize shelter and castling structure.
+KING_MIDGAME_TABLE = [
+	[-30, -40, -40, -50, -50, -40, -40, -30],
+	[-30, -40, -40, -50, -50, -40, -40, -30],
+	[-30, -40, -40, -50, -50, -40, -40, -30],
+	[-30, -40, -40, -50, -50, -40, -40, -30],
+	[-20, -30, -30, -40, -40, -30, -30, -20],
+	[-10, -20, -20, -20, -20, -20, -20, -10],
+	[20, 20, 0, 0, 0, 0, 20, 20],
+	[20, 30, 10, 0, 0, 10, 30, 20],
+]
+
+# King table for endgame: reward centralization and activity.
+KING_ENDGAME_TABLE = [
+	[-50, -40, -30, -20, -20, -30, -40, -50],
+	[-30, -20, -10, 0, 0, -10, -20, -30],
+	[-30, -10, 20, 30, 30, 20, -10, -30],
+	[-30, -10, 30, 40, 40, 30, -10, -30],
+	[-30, -10, 30, 40, 40, 30, -10, -30],
+	[-30, -10, 20, 30, 30, 20, -10, -30],
+	[-30, -30, 0, 0, 0, 0, -30, -30],
+	[-50, -30, -30, -30, -30, -30, -30, -50],
+]
 
 # Square coordinates for castling: where the king and rook start and end,
 # and which squares the king must not be attacked on while castling.
@@ -50,6 +159,22 @@ CASTLING_CONFIG: dict = {
 		"K": {"king_start": (0, 4), "king_end": (0, 6), "rook_start": (0, 7), "rook_end": (0, 5), "pass_through": [(0, 5), (0, 6)]},
 		"Q": {"king_start": (0, 4), "king_end": (0, 2), "rook_start": (0, 0), "rook_end": (0, 3), "pass_through": [(0, 3), (0, 2)]},
 	},
+}
+
+
+# Opening book: Common opening sequences for recognition.
+# Maps first 3-4 moves to opening name and strategic ideas.
+OPENING_BOOK: dict[str, dict] = {
+	"e2e4c7c5": {"name": "Sicilian Defense", "idea": "Asymmetric, fighting defense"},
+	"e2e4e7e5": {"name": "Open Game", "idea": "Classical, symmetrical center"},
+	"e2e4c7c5g1f3": {"name": "Sicilian Najdorf", "idea": "Sharp, flexible Sicilian"},
+	"e2e4e7e5g1f3g8f6": {"name": "Italian Opening", "idea": "Classical development"},
+	"d2d4d7d5c2c4": {"name": "Queen's Gambit", "idea": "Strong center control"},
+	"d2d4g8f6c2c4e7e6": {"name": "Queen's Gambit Declined", "idea": "Solid, positional defense"},
+	"e2e4e7e5g1f3g8f6f1c4": {"name": "Italian Game", "idea": "Rapid development, kingside attack"},
+	"e2e4c7c5g1f3d7d6": {"name": "Sicilian Closed", "idea": "Positional fighting chess"},
+	"g1f3g8f6d2d4e7e6": {"name": "Reti Opening", "idea": "Flexible, maneuvering style"},
+	"e2e4e7e5f1c4f8c5": {"name": "Bishop's Opening", "idea": "Solid, classical setup"},
 }
 
 
@@ -96,6 +221,7 @@ class MoveRecord:
 	result_before: str | None
 	halfmove_clock_before: int
 	position_counts_before: dict[str, int]
+	notation: str
 
 
 class ChessGame:
@@ -297,22 +423,79 @@ class ChessGame:
 		return False
 
 	def format_move_record(self, record: MoveRecord) -> str:
-		"""Return a human-readable single-line move description."""
-		parts = [
-			f"{record.move_index}.",
-			"White" if record.player == "w" else "Black",
-			f"{record.start_square}->{record.end_square}",
-			record.piece_symbol,
-		]
-		if record.captured_symbol is not None:
-			parts.append(f"x{record.captured_symbol}")
-		if record.is_castling:
-			parts.append("castle")
-		if record.is_en_passant:
-			parts.append("en-passant")
-		if record.promotion_to is not None:
-			parts.append(f"promo={record.promotion_to}")
-		return " ".join(parts)
+		"""Return a notation-focused single-line move description."""
+		side_prefix = "W" if record.player == "w" else "B"
+		return f"{record.move_index}. {side_prefix} {record.notation}"
+
+	def find_same_type_attackers_to_target(
+		self,
+		piece: Piece,
+		start: tuple[int, int],
+		target: tuple[int, int],
+	) -> list[tuple[int, int]]:
+		"""Find same-type friendly pieces that could also move to target.
+
+		Used for SAN disambiguation (file/rank hints when multiple pieces can move
+		to the same destination square).
+		"""
+		candidates: list[tuple[int, int]] = []
+		for row in range(BOARD_SIZE):
+			for col in range(BOARD_SIZE):
+				other = self.get_piece(row, col)
+				if other is None:
+					continue
+				if (row, col) == start:
+					continue
+				if other.color != piece.color or other.kind != piece.kind:
+					continue
+				if self.is_legal_piece_move((row, col), target) and not self.leaves_king_in_check((row, col), target):
+					candidates.append((row, col))
+		return candidates
+
+	def build_san_base(
+		self,
+		piece: Piece,
+		start: tuple[int, int],
+		end: tuple[int, int],
+		is_capture: bool,
+		is_castling: bool,
+		is_en_passant: bool,
+		promotion_to: str | None,
+	) -> str:
+		"""Build SAN base (without trailing check/checkmate marker)."""
+		if is_castling:
+			return "O-O" if end[1] > start[1] else "O-O-O"
+
+		destination = self.format_square(*end)
+
+		# Pawn moves have unique SAN handling.
+		if piece.kind == "P":
+			if is_capture:
+				notation = f"{FILES[start[1]]}x{destination}"
+			else:
+				notation = destination
+			if promotion_to is not None:
+				notation += f"={promotion_to}"
+			if is_en_passant:
+				notation += " e.p."
+			return notation
+
+		piece_letter = piece.kind
+		ambiguous = self.find_same_type_attackers_to_target(piece, start, end)
+
+		disambiguation = ""
+		if ambiguous:
+			same_file = any(col == start[1] for _, col in ambiguous)
+			same_rank = any(row == start[0] for row, _ in ambiguous)
+			if not same_file:
+				disambiguation = FILES[start[1]]
+			elif not same_rank:
+				disambiguation = str(8 - start[0])
+			else:
+				disambiguation = self.format_square(*start)
+
+		capture_marker = "x" if is_capture else ""
+		return f"{piece_letter}{disambiguation}{capture_marker}{destination}"
 
 	def undo_last_move(self) -> bool:
 		"""Undo the most recent move.
@@ -645,32 +828,37 @@ class ChessGame:
 					moves.append((start, end))
 		return moves
 
-	def move_piece(self, start_square: str, end_square: str, promotion_choice: str = "Q") -> bool:
+	def move_piece(self, start_square: str, end_square: str, promotion_choice: str = "Q", silent: bool = False) -> bool:
 		"""Attempt to move a piece.
 
 		promotion_choice is used when a pawn reaches the back rank.
 		Valid values: 'Q', 'R', 'B', 'N'. Defaults to Queen.
+		Set silent=True to suppress user-facing prints (useful for AI search).
 		Returns True if the move succeeds, otherwise False.
 		"""
 		try:
 			start = self.parse_square(start_square)
 			end = self.parse_square(end_square)
 		except ValueError as error:
-			print(f"Input error: {error}")
+			if not silent:
+				print(f"Input error: {error}")
 			return False
 
 		piece = self.get_piece(*start)
 		if piece is None:
-			print("No piece on the starting square.")
+			if not silent:
+				print("No piece on the starting square.")
 			return False
 
 		if piece.color != self.current_turn:
 			side_name = "White" if self.current_turn == "w" else "Black"
-			print(f"It is {side_name}'s turn.")
+			if not silent:
+				print(f"It is {side_name}'s turn.")
 			return False
 
 		if start == end:
-			print("Start and end squares are the same.")
+			if not silent:
+				print("Start and end squares are the same.")
 			return False
 
 		# Castling is detected by the king moving two squares horizontally.
@@ -680,14 +868,17 @@ class ChessGame:
 		if is_castling:
 			castle_side = "K" if end[1] > start[1] else "Q"
 			if not self.can_castle(piece.color, castle_side):
-				print("Castling is not available in this position.")
+				if not silent:
+					print("Castling is not available in this position.")
 				return False
 		else:
 			if not self.is_legal_piece_move(start, end):
-				print("That move is not legal for this piece in the current position.")
+				if not silent:
+					print("That move is not legal for this piece in the current position.")
 				return False
 			if self.leaves_king_in_check(start, end):
-				print("That move would leave your king in check.")
+				if not silent:
+					print("That move would leave your king in check.")
 				return False
 
 		# En passant: pawn captures diagonally to an empty square.
@@ -716,6 +907,23 @@ class ChessGame:
 		promotion_rank = 0 if piece.color == "w" else 7
 		is_promotion = piece.kind == "P" and end[0] == promotion_rank
 
+		promotion_to: str | None = None
+		if is_promotion:
+			valid = {"Q", "R", "B", "N"}
+			promotion_to = promotion_choice.upper() if promotion_choice.upper() in valid else "Q"
+
+		# Build notation now using the pre-move board, then append check/checkmate
+		# marker after the move is applied.
+		san_base = self.build_san_base(
+			piece=piece,
+			start=start,
+			end=end,
+			is_capture=captured_piece is not None,
+			is_castling=is_castling,
+			is_en_passant=is_en_passant,
+			promotion_to=promotion_to,
+		)
+
 		# --- Execute the move ---
 		if is_castling and castle_side is not None:
 			cfg = CASTLING_CONFIG[piece.color][castle_side]
@@ -729,12 +937,8 @@ class ChessGame:
 			self.make_move_on_board(start, end)
 
 		# Replace pawn with chosen piece on promotion.
-		promotion_to: str | None = None
 		if is_promotion:
-			valid = {"Q", "R", "B", "N"}
-			promo = promotion_choice.upper() if promotion_choice.upper() in valid else "Q"
-			self.board[end[0]][end[1]] = Piece(piece.color, promo)
-			promotion_to = promo
+			self.board[end[0]][end[1]] = Piece(piece.color, promotion_to if promotion_to is not None else "Q")
 
 		# --- Update castling rights ---
 		# Moving the king revokes both castling rights for that side.
@@ -763,25 +967,40 @@ class ChessGame:
 		self.current_turn = "b" if self.current_turn == "w" else "w"
 		self.record_current_position()
 
+		opponent_in_check = self.is_in_check(self.current_turn)
+		opponent_in_checkmate = self.is_checkmate(self.current_turn)
+
 		# Check terminal conditions for the side that now has to move.
-		if self.is_checkmate(self.current_turn):
+		if opponent_in_checkmate:
 			winner = "Black" if self.current_turn == "w" else "White"
 			loser = "White" if self.current_turn == "w" else "Black"
 			self.result = f"checkmate_{self.current_turn}"
-			print(f"Checkmate! {loser} is in checkmate. {winner} wins!")
+			if not silent:
+				print(f"Checkmate! {loser} is in checkmate. {winner} wins!")
 		elif self.is_stalemate(self.current_turn):
 			side_name = "White" if self.current_turn == "w" else "Black"
 			self.result = "stalemate"
-			print(f"Stalemate! {side_name} has no legal moves and is not in check. Draw.")
+			if not silent:
+				print(f"Stalemate! {side_name} has no legal moves and is not in check. Draw.")
 		elif self.is_insufficient_material():
 			self.result = "draw_insufficient_material"
-			print("Draw by insufficient material.")
+			if not silent:
+				print("Draw by insufficient material.")
 		elif self.is_fifty_move_draw():
 			self.result = "draw_fifty_move"
-			print("Draw by fifty-move rule.")
+			if not silent:
+				print("Draw by fifty-move rule.")
 		elif self.is_threefold_repetition():
 			self.result = "draw_threefold"
-			print("Draw by threefold repetition.")
+			if not silent:
+				print("Draw by threefold repetition.")
+
+		notation_suffix = ""
+		if opponent_in_checkmate:
+			notation_suffix = "#"
+		elif opponent_in_check:
+			notation_suffix = "+"
+		final_notation = san_base + notation_suffix
 
 		record = MoveRecord(
 			move_index=len(self.move_history) + 1,
@@ -800,10 +1019,400 @@ class ChessGame:
 			result_before=result_before,
 			halfmove_clock_before=halfmove_clock_before,
 			position_counts_before=position_counts_before,
+			notation=final_notation,
 		)
 		self.move_history.append(record)
 
 		return True
+
+	def evaluate_position(self, perspective_color: str) -> int:
+		"""Evaluate the position from one side's perspective.
+
+		Positive is good for perspective_color, negative is bad.
+		"""
+		if self.result is not None:
+			if self.result.startswith("checkmate_"):
+				checkmated_color = self.result.split("_")[1]
+				return -CHECKMATE_SCORE if checkmated_color == perspective_color else CHECKMATE_SCORE
+			# Stalemate and draw_* are neutral.
+			return 0
+
+		non_pawn_material = 0
+		for row in range(BOARD_SIZE):
+			for col in range(BOARD_SIZE):
+				piece = self.get_piece(row, col)
+				if piece is None:
+					continue
+				if piece.kind in {"N", "B", "R", "Q"}:
+					non_pawn_material += PIECE_VALUES[piece.kind]
+
+		phase = min(1.0, non_pawn_material / MAX_NON_PAWN_MATERIAL)
+
+		def king_table_blended_value(lookup_row: int, col: int) -> int:
+			mid = KING_MIDGAME_TABLE[lookup_row][col]
+			end = KING_ENDGAME_TABLE[lookup_row][col]
+			return int(round(phase * mid + (1.0 - phase) * end))
+
+		def piece_square_value(piece: Piece, row: int, col: int) -> int:
+			lookup_row = row if piece.color == "w" else (BOARD_SIZE - 1 - row)
+			if piece.kind == "K":
+				return king_table_blended_value(lookup_row, col)
+			table = PIECE_SQUARE_TABLES[piece.kind]
+			return table[lookup_row][col]
+
+		def king_safety_score(color: str) -> int:
+			king_square = self.find_king(color)
+			if king_square is None:
+				return 0
+
+			score = 0
+			king_row, king_col = king_square
+			home_row = 7 if color == "w" else 0
+			pawn_row = king_row - 1 if color == "w" else king_row + 1
+
+			# Reward castled king structure and nearby pawn shield.
+			if king_row == home_row and king_col in {2, 6}:
+				score += CASTLED_BONUS
+
+			if self.castling_rights[color]["K"]:
+				score += CASTLING_RIGHT_BONUS
+			if self.castling_rights[color]["Q"]:
+				score += CASTLING_RIGHT_BONUS
+
+			if 0 <= pawn_row < BOARD_SIZE:
+				for dc in (-1, 0, 1):
+					pc = king_col + dc
+					if not self.in_bounds(pawn_row, pc):
+						continue
+					shield_piece = self.get_piece(pawn_row, pc)
+					if shield_piece is not None and shield_piece.color == color and shield_piece.kind == "P":
+						score += PAWN_SHIELD_BONUS
+
+			if self.is_in_check(color):
+				score -= IN_CHECK_PENALTY
+
+			return score
+
+		def is_pawn_passed(row: int, col: int, color: str) -> bool:
+			"""Check if a pawn on (row, col) is passed (no enemy pawns can stop it)."""
+			enemy = self.opposite_color(color)
+			direction = -1 if color == "w" else 1
+			start_check = row + direction
+			end_check = 0 if color == "w" else BOARD_SIZE
+			step = direction
+			for check_row in range(start_check, end_check, step):
+				for check_col in range(max(0, col - 1), min(BOARD_SIZE, col + 2)):
+					enemy_pawn = self.get_piece(check_row, check_col)
+					if enemy_pawn is not None and enemy_pawn.color == enemy and enemy_pawn.kind == "P":
+						return False
+			return True
+
+		def tactical_score(color: str) -> int:
+			score = 0
+
+			# Passed pawn bonus.
+			for row in range(BOARD_SIZE):
+				for col in range(BOARD_SIZE):
+					piece = self.get_piece(row, col)
+					if piece is None or piece.color != color or piece.kind != "P":
+						continue
+					if is_pawn_passed(row, col, color):
+						score += PASSED_PAWN_BONUS
+
+			# Doubled pawn penalty.
+			for col in range(BOARD_SIZE):
+				pawn_count = 0
+				for row in range(BOARD_SIZE):
+					piece = self.get_piece(row, col)
+					if piece is not None and piece.color == color and piece.kind == "P":
+						pawn_count += 1
+				if pawn_count > 1:
+					score -= DOUBLED_PAWN_PENALTY * (pawn_count - 1)
+
+			# Isolated pawn penalty.
+			for row in range(BOARD_SIZE):
+				for col in range(BOARD_SIZE):
+					piece = self.get_piece(row, col)
+					if piece is None or piece.color != color or piece.kind != "P":
+						continue
+					# Check adjacent files for friendly pawns.
+					has_support = False
+					for adj_col in (col - 1, col + 1):
+						if not self.in_bounds(row, adj_col):
+							continue
+						for check_row in range(BOARD_SIZE):
+							neighbor = self.get_piece(check_row, adj_col)
+							if neighbor is not None and neighbor.color == color and neighbor.kind == "P":
+								has_support = True
+								break
+						if has_support:
+							break
+					if not has_support:
+						score -= ISO_PAWN_PENALTY
+
+			# Bishop pair bonus (two bishops = strong midgame).
+			bishop_count = 0
+			for row in range(BOARD_SIZE):
+				for col in range(BOARD_SIZE):
+					piece = self.get_piece(row, col)
+					if piece is not None and piece.color == color and piece.kind == "B":
+						bishop_count += 1
+			if bishop_count >= 2:
+				score += BISHOP_PAIR_BONUS
+
+			# Rook on open file bonus.
+			for row in range(BOARD_SIZE):
+				for col in range(BOARD_SIZE):
+					piece = self.get_piece(row, col)
+					if piece is None or piece.color != color or piece.kind != "R":
+						continue
+					# Check if file is open (no pawns of any color).
+					file_open = True
+					for check_row in range(BOARD_SIZE):
+						file_piece = self.get_piece(check_row, col)
+						if file_piece is not None and file_piece.kind == "P":
+							file_open = False
+							break
+					if file_open:
+						score += ROOK_OPEN_FILE_BONUS
+
+			return score
+
+		material_score = 0
+		piece_square_score = 0
+		for row in range(BOARD_SIZE):
+			for col in range(BOARD_SIZE):
+				piece = self.get_piece(row, col)
+				if piece is None:
+					continue
+				sign = 1 if piece.color == "w" else -1
+				material_score += sign * PIECE_VALUES[piece.kind]
+				piece_square_score += sign * piece_square_value(piece, row, col)
+
+		mobility_score = MOBILITY_WEIGHT * (
+			len(self.generate_legal_moves_for_color("w")) - len(self.generate_legal_moves_for_color("b"))
+		)
+		king_safety = king_safety_score("w") - king_safety_score("b")
+		tactical = tactical_score("w") - tactical_score("b")
+
+		total_score = material_score + piece_square_score + mobility_score + king_safety + tactical
+		return total_score if perspective_color == "w" else -total_score
+
+	def score_move_for_ordering(self, start: tuple[int, int], end: tuple[int, int]) -> int:
+		"""Heuristic score for move ordering: captures > checks > quiet moves.
+		
+		Higher scores are evaluated first, improving alpha-beta cutoff rates.
+		"""
+		target_piece = self.get_piece(*end)
+		is_capture = target_piece is not None
+		
+		# Simulate move to check if it gives check.
+		piece = self.get_piece(*start)
+		if piece is None:
+			return 0
+		
+		captured = self.make_move_on_board(start, end)
+		gives_check = self.is_in_check(self.opposite_color(self.current_turn))
+		self.undo_move_on_board(start, end, captured)
+		
+		# Score: captures (1000+) > checks (500) > quiet (0).
+		if is_capture:
+			# Prioritize captures of higher-value pieces.
+			return 1000 + PIECE_VALUES.get(target_piece.kind, 0)
+		elif gives_check:
+			return 500
+		else:
+			return 0
+
+	def minimax_alpha_beta(self, depth: int, alpha: int, beta: int, perspective_color: str) -> int:
+		"""Minimax with alpha-beta pruning using current game state."""
+		if depth == 0 or self.result is not None:
+			return self.evaluate_position(perspective_color)
+
+		legal_moves = self.generate_legal_moves_for_color(self.current_turn)
+		if not legal_moves:
+			return self.evaluate_position(perspective_color)
+
+		# Move ordering: prioritize captures and checks for better pruning.
+		legal_moves.sort(key=lambda move: self.score_move_for_ordering(move[0], move[1]), reverse=True)
+
+		is_maximizing = self.current_turn == perspective_color
+
+		if is_maximizing:
+			best_score = -10**9
+			for start, end in legal_moves:
+				child = copy.deepcopy(self)
+				child.move_piece(child.format_square(*start), child.format_square(*end), promotion_choice="Q", silent=True)
+				score = child.minimax_alpha_beta(depth - 1, alpha, beta, perspective_color)
+				best_score = max(best_score, score)
+				alpha = max(alpha, best_score)
+				if beta <= alpha:
+					break
+			return best_score
+
+		best_score = 10**9
+		for start, end in legal_moves:
+			child = copy.deepcopy(self)
+			child.move_piece(child.format_square(*start), child.format_square(*end), promotion_choice="Q", silent=True)
+			score = child.minimax_alpha_beta(depth - 1, alpha, beta, perspective_color)
+			best_score = min(best_score, score)
+			beta = min(beta, best_score)
+			if beta <= alpha:
+				break
+		return best_score
+
+	def get_position_quality(self, color: str) -> tuple[int, str]:
+		"""Evaluate position and return (score, quality_assessment)."""
+		score = self.evaluate_position(color)
+		if score >= 500:
+			quality = "winning"
+		elif score >= 200:
+			quality = "better"
+		elif score <= -500:
+			quality = "losing"
+		elif score <= -200:
+			quality = "worse"
+		else:
+			quality = "equal"
+		return score, quality
+
+	def get_top_moves_minimax(self, color: str, depth: int = 2, top_n: int = 3) -> list[tuple[tuple[int, int], tuple[int, int], int]]:
+		"""Return top N moves with their evaluation scores.
+		
+		Returns list of (start, end, score) tuples sorted by score descending.
+		"""
+		if color != self.current_turn:
+			return []
+
+		legal_moves = self.generate_legal_moves_for_color(color)
+		if not legal_moves:
+			return []
+
+		move_scores: list[tuple[tuple[int, int], tuple[int, int], int]] = []
+		for start, end in legal_moves:
+			child = copy.deepcopy(self)
+			child.move_piece(child.format_square(*start), child.format_square(*end), promotion_choice="Q", silent=True)
+			score = child.minimax_alpha_beta(depth - 1, -10**9, 10**9, color)
+			move_scores.append((start, end, score))
+
+		# Sort by score descending.
+		move_scores.sort(key=lambda x: x[2], reverse=True)
+		return move_scores[:top_n]
+
+	def detect_opening(self) -> tuple[str, str] | None:
+		"""Detect current opening from move sequence.
+		
+		Returns (opening_name, strategic_idea) if recognized, else None.
+		"""
+		# Build move sequence key (first 4 moves max).
+		moves_key = ""
+		for record in self.move_history[:4]:
+			moves_key += record.start_square.replace(" ", "") + record.end_square.replace(" ", "")
+
+		# Check opening book.
+		for book_key, book_data in OPENING_BOOK.items():
+			if moves_key.startswith(book_key):
+				return book_data["name"], book_data["idea"]
+		return None
+
+	def get_move_quality_assessment(self, eval_before: int, eval_after: int, color: str) -> str:
+		"""Assess move quality based on evaluation change.
+		
+		Returns assessment string for display.
+		"""
+		# From perspective of the player who just moved.
+		eval_swing = eval_after - eval_before
+		
+		if eval_swing <= -200:
+			return "Blunder! 😬"
+		elif eval_swing <= -100:
+			return "Inaccuracy"
+		elif eval_swing >= 200:
+			return "Excellent! 🎯"
+		elif eval_swing >= 100:
+			return "Good move"
+		else:
+			return "Okay"
+
+	def choose_best_move_minimax(self, color: str, depth: int = 2) -> tuple[tuple[int, int], tuple[int, int]] | None:
+		"""Choose the best legal move for color via minimax + alpha-beta."""
+		if color != self.current_turn:
+			return None
+
+		legal_moves = self.generate_legal_moves_for_color(color)
+		if not legal_moves:
+			return None
+
+		best_move: tuple[tuple[int, int], tuple[int, int]] | None = None
+		best_score = -10**9
+
+		for start, end in legal_moves:
+			child = copy.deepcopy(self)
+			child.move_piece(child.format_square(*start), child.format_square(*end), promotion_choice="Q", silent=True)
+			score = child.minimax_alpha_beta(depth - 1, -10**9, 10**9, color)
+			if score > best_score:
+				best_score = score
+				best_move = (start, end)
+
+		return best_move
+
+	def play_minimax_bot_move(self, color: str | None = None, depth: int = 2) -> bool:
+		"""Play one move chosen by minimax bot."""
+		if self.result is not None:
+			return False
+
+		bot_color = self.current_turn if color is None else color
+		if bot_color != self.current_turn:
+			return False
+
+		picked = self.choose_best_move_minimax(bot_color, depth=depth)
+		if picked is None:
+			return False
+
+		start, end = picked
+		start_sq = self.format_square(*start)
+		end_sq = self.format_square(*end)
+
+		played = self.move_piece(start_sq, end_sq, promotion_choice="Q")
+		if played and self.move_history:
+			who = "White" if bot_color == "w" else "Black"
+			print(f"{who} minimax bot played: {self.move_history[-1].notation}")
+		return played
+
+	def choose_random_legal_move(self, color: str) -> tuple[tuple[int, int], tuple[int, int]] | None:
+		"""Return one random legal move for the given side, or None if none exist."""
+		moves = self.generate_legal_moves_for_color(color)
+		if not moves:
+			return None
+		return random.choice(moves)
+
+	def play_random_bot_move(self, color: str | None = None) -> bool:
+		"""Play one random legal move for the bot.
+
+		If color is None, the bot plays for the current side to move.
+		Returns True if a move was played, False otherwise.
+		"""
+		if self.result is not None:
+			return False
+
+		bot_color = self.current_turn if color is None else color
+		if bot_color != self.current_turn:
+			return False
+
+		picked = self.choose_random_legal_move(bot_color)
+		if picked is None:
+			return False
+
+		start, end = picked
+		start_sq = self.format_square(*start)
+		end_sq = self.format_square(*end)
+
+		# Minimal bot behavior for now: always promote to queen.
+		played = self.move_piece(start_sq, end_sq, promotion_choice="Q")
+		if played and self.move_history:
+			who = "White" if bot_color == "w" else "Black"
+			print(f"{who} bot played: {self.move_history[-1].notation}")
+		return played
 
 	def prompt_loop(self) -> None:
 		"""Run a simple terminal game loop.
@@ -815,6 +1424,8 @@ class ChessGame:
 		- history   show all played moves
 		- undo   undo the last move
 		- draw?   show current draw-rule counters and status
+		- bot   let current side play one random bot move
+		- bot2   let current side play minimax bot move (depth 2)
 		- quit    exit the program
 		"""
 		print("Welcome to the chess project foundation.")
@@ -824,6 +1435,8 @@ class ChessGame:
 		print("Type 'history' to show move history.")
 		print("Type 'undo' to revert the last move.")
 		print("Type 'draw?' to inspect draw-rule status.")
+		print("Type 'bot' to let current side play a random move.")
+		print("Type 'bot2' for minimax bot move (depth 2).")
 		print("Type 'quit' to stop.")
 
 		while True:
@@ -867,6 +1480,18 @@ class ChessGame:
 				print(f"Halfmove clock: {self.halfmove_clock} (draw at 100)")
 				print(f"Current position repeats: {position_repeats} (draw at 3)")
 				print(f"Insufficient material: {'yes' if self.is_insufficient_material() else 'no'}")
+				continue
+
+			if user_input.lower() == "bot":
+				played = self.play_random_bot_move()
+				if not played:
+					print("Bot could not play a move in this position.")
+				continue
+
+			if user_input.lower() == "bot2":
+				played = self.play_minimax_bot_move(depth=2)
+				if not played:
+					print("Minimax bot could not play a move in this position.")
 				continue
 
 			if user_input.lower() == "moves":

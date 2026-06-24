@@ -37,10 +37,20 @@ except ImportError:
 BOARD_SIZE = 8
 TILE_SIZE = 96
 BOARD_PIXELS = BOARD_SIZE * TILE_SIZE
-PANEL_WIDTH = 280
+PANEL_WIDTH = 340
 WINDOW_WIDTH = BOARD_PIXELS + PANEL_WIDTH
 WINDOW_HEIGHT = BOARD_PIXELS
 FPS = 60
+BOT_ENABLED = True
+BOT_COLOR = "b"
+BOT_MODE = "minimax"
+BOT_DEPTH = 2
+BOT_MOVE_DELAY_MS = 300
+BOT_DIFFICULTY_TO_DEPTH = {
+    "easy": 1,
+    "medium": 2,
+    "hard": 3,
+}
 
 LIGHT_SQUARE = (238, 238, 210)
 DARK_SQUARE = (118, 150, 86)
@@ -116,6 +126,10 @@ def draw_sidebar(
     game: ChessGame,
     ui_font: pygame.font.Font,
     small_font: pygame.font.Font,
+    bot_difficulty: str,
+    bot_depth: int,
+    training_mode: bool,
+    last_move_quality: str | None,
 ) -> None:
     """Draw side panel status and minimal controls help."""
     panel_rect = pygame.Rect(BOARD_PIXELS, 0, PANEL_WIDTH, WINDOW_HEIGHT)
@@ -124,7 +138,9 @@ def draw_sidebar(
     x0 = BOARD_PIXELS + 16
     y = 16
 
-    title = ui_font.render("Chess UI", True, TEXT_ACCENT)
+    # Title with training mode indicator.
+    title_text = "Chess UI [LEARNING MODE]" if training_mode else "Chess UI"
+    title = ui_font.render(title_text, True, (76, 175, 80) if training_mode else TEXT_ACCENT)
     surface.blit(title, (x0, y))
     y += 40
 
@@ -132,6 +148,20 @@ def draw_sidebar(
     turn_line = small_font.render(f"Turn: {turn_name}", True, TEXT_PRIMARY)
     surface.blit(turn_line, (x0, y))
     y += 26
+
+    # Position evaluation.
+    eval_score, eval_quality = game.get_position_quality(game.current_turn)
+    eval_display = f"{eval_score:+.1f} ({eval_quality})"
+    eval_text = small_font.render(f"Position: {eval_display}", True, TEXT_ACCENT)
+    surface.blit(eval_text, (x0, y))
+    y += 26
+
+    # Last move quality (blunder detection).
+    if last_move_quality is not None:
+        quality_color = (231, 76, 60) if "Blunder" in last_move_quality else (76, 175, 80) if "Excellent" in last_move_quality else TEXT_PRIMARY
+        quality_text = small_font.render(f"Last move: {last_move_quality}", True, quality_color)
+        surface.blit(quality_text, (x0, y))
+        y += 26
 
     if game.is_in_check(game.current_turn) and game.result is None:
         in_check = small_font.render("Status: In Check", True, (241, 196, 15))
@@ -145,6 +175,17 @@ def draw_sidebar(
     surface.blit(game_line, (x0, y))
     y += 34
 
+    # Opening detection.
+    opening_info = game.detect_opening()
+    if opening_info is not None:
+        opening_name, opening_idea = opening_info
+        opening_text = small_font.render(f"Opening: {opening_name}", True, TEXT_ACCENT)
+        surface.blit(opening_text, (x0, y))
+        y += 22
+        idea_text = small_font.render(opening_idea, True, (160, 160, 160))
+        surface.blit(idea_text, (x0, y))
+        y += 28
+
     controls_title = small_font.render("Controls", True, TEXT_ACCENT)
     surface.blit(controls_title, (x0, y))
     y += 24
@@ -152,22 +193,43 @@ def draw_sidebar(
     controls = [
         "Click piece -> select",
         "Click target -> move",
+        f"Black bot: {BOT_MODE}",
+        f"Difficulty: {bot_difficulty} (d={bot_depth})",
+        "1/2/3 -> easy/medium/hard",
+        "T -> training mode",
         "U -> undo",
         "R -> new game",
         "Esc -> quit",
-        "Promotion auto=Q",
     ]
     for line in controls:
         t = small_font.render(line, True, TEXT_PRIMARY)
         surface.blit(t, (x0, y))
         y += 22
 
+    # Training mode suggestions.
+    if training_mode and game.result is None:
+        y += 10
+        suggestions_title = small_font.render("Top Moves", True, TEXT_ACCENT)
+        surface.blit(suggestions_title, (x0, y))
+        y += 24
+
+        top_moves = game.get_top_moves_minimax(game.current_turn, depth=2, top_n=3)
+        if top_moves:
+            for i, (start, end, score) in enumerate(top_moves, 1):
+                move_notation = f"{game.format_square(*start)}-{game.format_square(*end)}"
+                move_text = small_font.render(f"{i}. {move_notation} {score:+.1f}", True, (100, 200, 255))
+                surface.blit(move_text, (x0, y))
+                y += 22
+        else:
+            t = small_font.render("(analyzing...)", True, (160, 160, 160))
+            surface.blit(t, (x0, y))
+
     y += 10
     history_title = small_font.render("Recent Moves", True, TEXT_ACCENT)
     surface.blit(history_title, (x0, y))
     y += 24
 
-    recent = game.move_history[-8:]
+    recent = game.move_history[-6:]
     if not recent:
         t = small_font.render("(none)", True, (160, 160, 160))
         surface.blit(t, (x0, y))
@@ -175,7 +237,7 @@ def draw_sidebar(
         for record in recent:
             text = game.format_move_record(record)
             # Keep lines narrow for the sidebar.
-            text = text if len(text) <= 32 else text[:29] + "..."
+            text = text if len(text) <= 28 else text[:25] + "..."
             t = small_font.render(text, True, (210, 210, 210))
             surface.blit(t, (x0, y))
             y += 20
@@ -197,6 +259,12 @@ def main() -> None:
     game = ChessGame()
     selected_square: tuple[int, int] | None = None
     legal_targets: list[tuple[int, int]] = []
+    bot_difficulty = "medium"
+    bot_depth = BOT_DIFFICULTY_TO_DEPTH[bot_difficulty]
+    next_bot_move_at = pygame.time.get_ticks() + BOT_MOVE_DELAY_MS
+    training_mode = False
+    last_move_quality: str | None = None
+    prev_eval: int = 0
 
     running = True
     while running:
@@ -207,14 +275,32 @@ def main() -> None:
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
+                elif event.key == pygame.K_1:
+                    bot_difficulty = "easy"
+                    bot_depth = BOT_DIFFICULTY_TO_DEPTH[bot_difficulty]
+                    next_bot_move_at = pygame.time.get_ticks() + BOT_MOVE_DELAY_MS
+                elif event.key == pygame.K_2:
+                    bot_difficulty = "medium"
+                    bot_depth = BOT_DIFFICULTY_TO_DEPTH[bot_difficulty]
+                    next_bot_move_at = pygame.time.get_ticks() + BOT_MOVE_DELAY_MS
+                elif event.key == pygame.K_3:
+                    bot_difficulty = "hard"
+                    bot_depth = BOT_DIFFICULTY_TO_DEPTH[bot_difficulty]
+                    next_bot_move_at = pygame.time.get_ticks() + BOT_MOVE_DELAY_MS
+                elif event.key == pygame.K_t:
+                    training_mode = not training_mode
                 elif event.key == pygame.K_u:
                     game.undo_last_move()
                     selected_square = None
                     legal_targets = []
+                    next_bot_move_at = pygame.time.get_ticks() + BOT_MOVE_DELAY_MS
                 elif event.key == pygame.K_r:
                     game = ChessGame()
                     selected_square = None
                     legal_targets = []
+                    next_bot_move_at = pygame.time.get_ticks() + BOT_MOVE_DELAY_MS
+                    last_move_quality = None
+                    prev_eval = 0
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 board_square = square_from_mouse(event.pos)
@@ -228,10 +314,22 @@ def main() -> None:
                 if selected_square is not None and (row, col) in legal_targets and game.result is None:
                     start = game.format_square(*selected_square)
                     end = game.format_square(row, col)
+                    
+                    # Capture evaluation before move (for blunder detection).
+                    prev_eval = game.evaluate_position(game.current_turn)
+                    
                     # Minimal UI choice: auto-promote to queen for now.
                     game.move_piece(start, end, promotion_choice="Q")
+                    
+                    # Assess move quality if in training mode.
+                    if training_mode and game.move_history:
+                        new_eval = game.evaluate_position(game.current_turn)
+                        # Perspective: from previous player's view (so negate for current player).
+                        last_move_quality = game.get_move_quality_assessment(-prev_eval, -new_eval, game.opposite_color(game.current_turn))
+                    
                     selected_square = None
                     legal_targets = []
+                    next_bot_move_at = pygame.time.get_ticks() + BOT_MOVE_DELAY_MS
                     continue
 
                 # Select a new piece only if it belongs to the side to move.
@@ -243,9 +341,25 @@ def main() -> None:
                     selected_square = None
                     legal_targets = []
 
+        # Let the bot move automatically for its configured side.
+        # Delay prevents the move from feeling instantaneous and jarring.
+        now = pygame.time.get_ticks()
+        if (
+            BOT_ENABLED
+            and game.result is None
+            and game.current_turn == BOT_COLOR
+            and selected_square is None
+            and now >= next_bot_move_at
+        ):
+            if BOT_MODE == "minimax":
+                game.play_minimax_bot_move(BOT_COLOR, depth=bot_depth)
+            else:
+                game.play_random_bot_move(BOT_COLOR)
+            next_bot_move_at = now + BOT_MOVE_DELAY_MS
+
         draw_board(screen, selected_square, legal_targets)
         draw_pieces(screen, game, piece_font)
-        draw_sidebar(screen, game, ui_font, small_font)
+        draw_sidebar(screen, game, ui_font, small_font, bot_difficulty, bot_depth, training_mode, last_move_quality)
 
         pygame.display.flip()
         clock.tick(FPS)
