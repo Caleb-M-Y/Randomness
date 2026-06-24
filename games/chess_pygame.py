@@ -23,7 +23,11 @@ What this UI intentionally keeps minimal:
 
 from __future__ import annotations
 
+import copy
+import json
 import sys
+from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 
 import pygame
 
@@ -47,6 +51,7 @@ BOT_MODE = "minimax"
 BOT_DEPTH = 2
 BOT_MOVE_DELAY_MS = 300
 TRAINING_HINT_DEPTH = 2
+PLAYER_STATS_PATH = Path(__file__).with_name("player_stats.json")
 BOT_DIFFICULTY_TO_DEPTH = {
     "easy": 1,
     "medium": 2,
@@ -122,6 +127,11 @@ def draw_pieces(surface: pygame.Surface, game: ChessGame, piece_font: pygame.fon
             surface.blit(glyph, rect)
 
 
+def compute_top_moves_snapshot(snapshot: ChessGame, color: str, depth: int, top_n: int) -> list[tuple[tuple[int, int], tuple[int, int], int]]:
+    """Compute top moves on a snapshot in a background thread."""
+    return snapshot.get_top_moves_minimax(color, depth=depth, top_n=top_n)
+
+
 def draw_sidebar(
     surface: pygame.Surface,
     game: ChessGame,
@@ -136,6 +146,12 @@ def draw_sidebar(
     opening_info: tuple[str, str] | None,
     top_moves: list[tuple[tuple[int, int], tuple[int, int], int]],
     top_moves_color: str,
+    analysis_mode: bool,
+    puzzle_mode: bool,
+    analysis_entries: list[dict],
+    puzzles: list[dict],
+    puzzle_index: int,
+    difficulty_suggestion: str,
 ) -> None:
     """Draw side panel status and minimal controls help."""
     panel_rect = pygame.Rect(BOARD_PIXELS, 0, PANEL_WIDTH, WINDOW_HEIGHT)
@@ -201,6 +217,8 @@ def draw_sidebar(
         f"Difficulty: {bot_difficulty} (d={bot_depth})",
         "1/2/3 -> easy/medium/hard",
         "T -> training mode",
+        "A -> analysis mode",
+        "P -> puzzle mode",
         "U -> undo",
         "R -> new game",
         "Esc -> quit",
@@ -227,6 +245,46 @@ def draw_sidebar(
         else:
             t = small_font.render("(analyzing...)", True, (160, 160, 160))
             surface.blit(t, (x0, y))
+
+    y += 10
+    diff_hint = small_font.render(f"Suggested difficulty: {difficulty_suggestion}", True, (160, 220, 180))
+    surface.blit(diff_hint, (x0, y))
+    y += 24
+
+    if analysis_mode:
+        analysis_title = small_font.render("Analysis Mode", True, TEXT_ACCENT)
+        surface.blit(analysis_title, (x0, y))
+        y += 22
+        if not analysis_entries:
+            surface.blit(small_font.render("(no analysis yet)", True, (160, 160, 160)), (x0, y))
+            y += 20
+        else:
+            for item in analysis_entries[-4:]:
+                line = f"{item['move_index']}. {item['notation']} {item['quality']}"
+                line = line if len(line) <= 34 else line[:31] + "..."
+                surface.blit(small_font.render(line, True, (230, 230, 200)), (x0, y))
+                y += 20
+
+    if puzzle_mode:
+        y += 8
+        puzzle_title = small_font.render("Puzzle Mode", True, TEXT_ACCENT)
+        surface.blit(puzzle_title, (x0, y))
+        y += 22
+        if not puzzles:
+            surface.blit(small_font.render("(no puzzles yet)", True, (160, 160, 160)), (x0, y))
+            y += 20
+        else:
+            puzzle = puzzles[puzzle_index % len(puzzles)]
+            surface.blit(small_font.render(f"#{puzzle_index + 1}: {puzzle['theme']}", True, (255, 220, 160)), (x0, y))
+            y += 20
+            prompt = puzzle["prompt"]
+            prompt = prompt if len(prompt) <= 34 else prompt[:31] + "..."
+            surface.blit(small_font.render(prompt, True, (220, 220, 220)), (x0, y))
+            y += 20
+            sol = f"Solution: {puzzle['solution']}"
+            sol = sol if len(sol) <= 34 else sol[:31] + "..."
+            surface.blit(small_font.render(sol, True, (180, 240, 180)), (x0, y))
+            y += 20
 
     y += 10
     history_title = small_font.render("Recent Moves", True, TEXT_ACCENT)
@@ -267,8 +325,39 @@ def main() -> None:
     bot_depth = BOT_DIFFICULTY_TO_DEPTH[bot_difficulty]
     next_bot_move_at = pygame.time.get_ticks() + BOT_MOVE_DELAY_MS
     training_mode = False
+    analysis_mode = False
+    puzzle_mode = False
     last_move_quality: str | None = None
     prev_eval: int = 0
+    analysis_entries: list[dict] = []
+    puzzles: list[dict] = []
+    puzzle_index = 0
+
+    # Persistent progression stats.
+    if PLAYER_STATS_PATH.exists():
+        try:
+            stats = json.loads(PLAYER_STATS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            stats = {}
+    else:
+        stats = {}
+    wins_by_level = stats.get("wins_by_level", {"easy": 0, "medium": 0, "hard": 0})
+    games_by_level = stats.get("games_by_level", {"easy": 0, "medium": 0, "hard": 0})
+
+    def save_stats() -> None:
+        data = {
+            "wins_by_level": wins_by_level,
+            "games_by_level": games_by_level,
+        }
+        PLAYER_STATS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def suggested_difficulty() -> str:
+        # Simple progression heuristic.
+        if games_by_level["easy"] >= 5 and games_by_level["easy"] > 0 and (wins_by_level["easy"] / games_by_level["easy"]) >= 0.7:
+            if games_by_level["medium"] >= 5 and games_by_level["medium"] > 0 and (wins_by_level["medium"] / games_by_level["medium"]) >= 0.6:
+                return "hard"
+            return "medium"
+        return "easy"
 
     # Cache expensive learning-analysis results. Recompute only when board state
     # or training-mode state changes.
@@ -279,6 +368,13 @@ def main() -> None:
     sidebar_opening_info: tuple[str, str] | None = None
     sidebar_top_moves: list[tuple[tuple[int, int], tuple[int, int], int]] = []
     sidebar_top_moves_color = game.current_turn
+
+    # Async hint analysis to keep frame rendering smooth.
+    hint_executor = ThreadPoolExecutor(max_workers=1)
+    hint_future: Future | None = None
+    hint_request_key: str | None = None
+    hint_result_key: str | None = None
+    hint_result_color = game.current_turn
 
     running = True
     while running:
@@ -303,18 +399,45 @@ def main() -> None:
                     next_bot_move_at = pygame.time.get_ticks() + BOT_MOVE_DELAY_MS
                 elif event.key == pygame.K_t:
                     training_mode = not training_mode
+                elif event.key == pygame.K_a:
+                    analysis_mode = not analysis_mode
+                    if analysis_mode:
+                        analysis_entries = game.get_game_analysis(limit=20)
+                elif event.key == pygame.K_p:
+                    puzzle_mode = not puzzle_mode
+                    if puzzle_mode:
+                        puzzles = game.generate_tactical_puzzles(limit=8)
+                        puzzle_index = 0
+                elif event.key == pygame.K_n:
+                    if puzzle_mode and puzzles:
+                        puzzle_index = (puzzle_index + 1) % len(puzzles)
                 elif event.key == pygame.K_u:
                     game.undo_last_move()
                     selected_square = None
                     legal_targets = []
                     next_bot_move_at = pygame.time.get_ticks() + BOT_MOVE_DELAY_MS
+                    analysis_entries = game.get_game_analysis(limit=20)
+                    if puzzle_mode:
+                        puzzles = game.generate_tactical_puzzles(limit=8)
+                        puzzle_index = 0
                 elif event.key == pygame.K_r:
+                    # Record finished game stats before reset.
+                    if game.move_history and game.result is not None:
+                        games_by_level[bot_difficulty] += 1
+                        # White is user in this setup.
+                        if game.result.startswith("checkmate_b"):
+                            wins_by_level[bot_difficulty] += 1
+                        save_stats()
+
                     game = ChessGame()
                     selected_square = None
                     legal_targets = []
                     next_bot_move_at = pygame.time.get_ticks() + BOT_MOVE_DELAY_MS
                     last_move_quality = None
                     prev_eval = 0
+                    analysis_entries = []
+                    puzzles = []
+                    puzzle_index = 0
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 board_square = square_from_mouse(event.pos)
@@ -340,6 +463,12 @@ def main() -> None:
                         new_eval = game.evaluate_position(game.current_turn)
                         # Perspective: from previous player's view (so negate for current player).
                         last_move_quality = game.get_move_quality_assessment(-prev_eval, -new_eval, game.opposite_color(game.current_turn))
+
+                    if analysis_mode:
+                        analysis_entries = game.get_game_analysis(limit=20)
+                    if puzzle_mode:
+                        puzzles = game.generate_tactical_puzzles(limit=8)
+                        puzzle_index = min(puzzle_index, max(0, len(puzzles) - 1))
                     
                     selected_square = None
                     legal_targets = []
@@ -371,6 +500,12 @@ def main() -> None:
                 game.play_random_bot_move(BOT_COLOR)
             next_bot_move_at = now + BOT_MOVE_DELAY_MS
 
+            if analysis_mode:
+                analysis_entries = game.get_game_analysis(limit=20)
+            if puzzle_mode:
+                puzzles = game.generate_tactical_puzzles(limit=8)
+                puzzle_index = min(puzzle_index, max(0, len(puzzles) - 1))
+
         # Refresh cached analysis only when needed. This avoids running
         # expensive minimax hint generation every render frame.
         current_position_key = game.current_position_key()
@@ -381,10 +516,37 @@ def main() -> None:
             sidebar_opening_info = game.detect_opening()
             if training_mode and game.result is None:
                 sidebar_top_moves_color = game.current_turn
-                sidebar_top_moves = game.get_top_moves_minimax(game.current_turn, depth=TRAINING_HINT_DEPTH, top_n=3)
+                # Request async analysis only once per unique position key.
+                if hint_request_key != current_position_key:
+                    hint_request_key = current_position_key
+                    hint_result_key = None
+                    sidebar_top_moves = []
+                    snapshot = copy.deepcopy(game)
+                    hint_future = hint_executor.submit(
+                        compute_top_moves_snapshot,
+                        snapshot,
+                        game.current_turn,
+                        TRAINING_HINT_DEPTH,
+                        3,
+                    )
             else:
                 sidebar_top_moves_color = game.current_turn
                 sidebar_top_moves = []
+
+        # Pull completed async hint results without blocking render loop.
+        if hint_future is not None and hint_future.done():
+            if hint_result_key != hint_request_key:
+                try:
+                    sidebar_top_moves = hint_future.result()
+                except Exception:
+                    sidebar_top_moves = []
+                hint_result_key = hint_request_key
+                hint_result_color = sidebar_top_moves_color
+            hint_future = None
+
+        # Keep display color synced with latest completed hint result.
+        if hint_result_key == sidebar_position_key:
+            sidebar_top_moves_color = hint_result_color
 
         draw_board(screen, selected_square, legal_targets)
         draw_pieces(screen, game, piece_font)
@@ -402,12 +564,19 @@ def main() -> None:
             sidebar_opening_info,
             sidebar_top_moves,
             sidebar_top_moves_color,
+            analysis_mode,
+            puzzle_mode,
+            analysis_entries,
+            puzzles,
+            puzzle_index,
+            suggested_difficulty(),
         )
 
         pygame.display.flip()
         clock.tick(FPS)
 
     pygame.quit()
+    hint_executor.shutdown(wait=False)
 
 
 if __name__ == "__main__":

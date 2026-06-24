@@ -24,3 +24,7 @@ Notes:
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
+
+
+TO ACTIVATE PYTHON 3.12.13 VENV 
+& ".\.venv312\Scripts\Activate.ps1"

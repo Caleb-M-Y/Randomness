@@ -1334,6 +1334,128 @@ class ChessGame:
 		else:
 			return "Okay"
 
+	def _snapshot_game(
+		self,
+		board: list[list[Piece | None]],
+		current_turn: str,
+		castling_rights: dict,
+		en_passant_target: tuple[int, int] | None,
+		result: str | None,
+		halfmove_clock: int,
+		position_counts: dict[str, int],
+	) -> "ChessGame":
+		"""Build a temporary game object from a snapshot for analysis."""
+		temp = ChessGame()
+		temp.board = copy.deepcopy(board)
+		temp.current_turn = current_turn
+		temp.castling_rights = copy.deepcopy(castling_rights)
+		temp.en_passant_target = en_passant_target
+		temp.result = result
+		temp.halfmove_clock = halfmove_clock
+		temp.position_counts = copy.deepcopy(position_counts)
+		temp.move_history = []
+		return temp
+
+	def get_game_analysis(self, limit: int = 16) -> list[dict]:
+		"""Return move-by-move analysis entries with evaluation deltas."""
+		if not self.move_history:
+			return []
+
+		entries: list[dict] = []
+		total = len(self.move_history)
+		start_index = max(0, total - limit)
+
+		for idx in range(start_index, total):
+			record = self.move_history[idx]
+			mover = record.player
+
+			before_state = self._snapshot_game(
+				board=record.board_before,
+				current_turn=record.current_turn_before,
+				castling_rights=record.castling_rights_before,
+				en_passant_target=record.en_passant_target_before,
+				result=record.result_before,
+				halfmove_clock=record.halfmove_clock_before,
+				position_counts=record.position_counts_before,
+			)
+
+			if idx + 1 < total:
+				next_record = self.move_history[idx + 1]
+				after_state = self._snapshot_game(
+					board=next_record.board_before,
+					current_turn=next_record.current_turn_before,
+					castling_rights=next_record.castling_rights_before,
+					en_passant_target=next_record.en_passant_target_before,
+					result=next_record.result_before,
+					halfmove_clock=next_record.halfmove_clock_before,
+					position_counts=next_record.position_counts_before,
+				)
+			else:
+				after_state = self._snapshot_game(
+					board=self.board,
+					current_turn=self.current_turn,
+					castling_rights=self.castling_rights,
+					en_passant_target=self.en_passant_target,
+					result=self.result,
+					halfmove_clock=self.halfmove_clock,
+					position_counts=self.position_counts,
+				)
+
+			eval_before = before_state.evaluate_position(mover)
+			eval_after = after_state.evaluate_position(mover)
+			delta = eval_after - eval_before
+			quality = self.get_move_quality_assessment(eval_before, eval_after, mover)
+
+			entries.append(
+				{
+					"move_index": record.move_index,
+					"player": mover,
+					"notation": record.notation,
+					"eval_before": eval_before,
+					"eval_after": eval_after,
+					"delta": delta,
+					"quality": quality,
+				}
+			)
+
+		return entries
+
+	def generate_tactical_puzzles(self, limit: int = 5, min_swing: int = 120) -> list[dict]:
+		"""Generate tactical puzzles from high-impact moves in played games."""
+		analysis = self.get_game_analysis(limit=max(limit * 4, 20))
+		if not analysis:
+			return []
+
+		candidates = []
+		for entry in analysis:
+			delta = entry["delta"]
+			notation = entry["notation"]
+			if abs(delta) < min_swing:
+				continue
+
+			theme = "tactic"
+			if "#" in notation:
+				theme = "mate"
+			elif "+" in notation:
+				theme = "check"
+			elif "x" in notation:
+				theme = "capture"
+
+			candidates.append(
+				{
+					"move_index": entry["move_index"],
+					"player": entry["player"],
+					"theme": theme,
+					"prompt": f"Move {entry['move_index']}: {'White' if entry['player'] == 'w' else 'Black'} to move.",
+					"solution": entry["notation"],
+					"impact": delta,
+				}
+			)
+
+		# Highest-impact motifs first.
+		candidates.sort(key=lambda p: abs(p["impact"]), reverse=True)
+		return candidates[:limit]
+
 	def choose_best_move_minimax(self, color: str, depth: int = 2) -> tuple[tuple[int, int], tuple[int, int]] | None:
 		"""Choose the best legal move for color via minimax + alpha-beta."""
 		if color != self.current_turn:
