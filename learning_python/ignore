@@ -1,0 +1,11 @@
+Move history + undo — store each move as a record (piece, from, to, captured, special flags). An undo stack lets players take back moves and is also needed for some draw-rule checks.
+
+Draw rules — fifty-move rule (no pawn move or capture in 50 moves), threefold repetition (same position three times), insufficient material. These are needed to make the engine rulebook-complete.
+
+Graphical UI — replace the terminal loop with a pygame window: 8×8 colored board, piece images (or Unicode glyphs), click-to-select + click-to-move, highlight legal moves, check/checkmate overlays.
+
+Move notation — generate standard algebraic notation (e4, Nf3, O-O, Qxd5+) for the move history panel.
+
+AI opponent — minimax with alpha-beta pruning and a simple evaluation function (material balance, piece-square tables). Optional depth slider.
+
+Polish — timers, sound effects, game save/load, piece animation.
