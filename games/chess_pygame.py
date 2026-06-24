@@ -46,6 +46,7 @@ BOT_COLOR = "b"
 BOT_MODE = "minimax"
 BOT_DEPTH = 2
 BOT_MOVE_DELAY_MS = 300
+TRAINING_HINT_DEPTH = 2
 BOT_DIFFICULTY_TO_DEPTH = {
     "easy": 1,
     "medium": 2,
@@ -130,6 +131,11 @@ def draw_sidebar(
     bot_depth: int,
     training_mode: bool,
     last_move_quality: str | None,
+    eval_score: int,
+    eval_quality: str,
+    opening_info: tuple[str, str] | None,
+    top_moves: list[tuple[tuple[int, int], tuple[int, int], int]],
+    top_moves_color: str,
 ) -> None:
     """Draw side panel status and minimal controls help."""
     panel_rect = pygame.Rect(BOARD_PIXELS, 0, PANEL_WIDTH, WINDOW_HEIGHT)
@@ -149,8 +155,7 @@ def draw_sidebar(
     surface.blit(turn_line, (x0, y))
     y += 26
 
-    # Position evaluation.
-    eval_score, eval_quality = game.get_position_quality(game.current_turn)
+    # Position evaluation is computed in the main loop and passed in as cached data.
     eval_display = f"{eval_score:+.1f} ({eval_quality})"
     eval_text = small_font.render(f"Position: {eval_display}", True, TEXT_ACCENT)
     surface.blit(eval_text, (x0, y))
@@ -175,8 +180,7 @@ def draw_sidebar(
     surface.blit(game_line, (x0, y))
     y += 34
 
-    # Opening detection.
-    opening_info = game.detect_opening()
+    # Opening detection is computed in the main loop and passed in as cached data.
     if opening_info is not None:
         opening_name, opening_idea = opening_info
         opening_text = small_font.render(f"Opening: {opening_name}", True, TEXT_ACCENT)
@@ -206,14 +210,14 @@ def draw_sidebar(
         surface.blit(t, (x0, y))
         y += 22
 
-    # Training mode suggestions.
+    # Training mode suggestions are computed in the main loop and passed in as cached data.
     if training_mode and game.result is None:
         y += 10
-        suggestions_title = small_font.render("Top Moves", True, TEXT_ACCENT)
+        side_label = "White" if top_moves_color == "w" else "Black"
+        suggestions_title = small_font.render(f"Top Moves ({side_label})", True, TEXT_ACCENT)
         surface.blit(suggestions_title, (x0, y))
         y += 24
 
-        top_moves = game.get_top_moves_minimax(game.current_turn, depth=2, top_n=3)
         if top_moves:
             for i, (start, end, score) in enumerate(top_moves, 1):
                 move_notation = f"{game.format_square(*start)}-{game.format_square(*end)}"
@@ -265,6 +269,16 @@ def main() -> None:
     training_mode = False
     last_move_quality: str | None = None
     prev_eval: int = 0
+
+    # Cache expensive learning-analysis results. Recompute only when board state
+    # or training-mode state changes.
+    sidebar_position_key: str | None = None
+    sidebar_training_mode = training_mode
+    sidebar_eval_score = 0
+    sidebar_eval_quality = "equal"
+    sidebar_opening_info: tuple[str, str] | None = None
+    sidebar_top_moves: list[tuple[tuple[int, int], tuple[int, int], int]] = []
+    sidebar_top_moves_color = game.current_turn
 
     running = True
     while running:
@@ -357,9 +371,38 @@ def main() -> None:
                 game.play_random_bot_move(BOT_COLOR)
             next_bot_move_at = now + BOT_MOVE_DELAY_MS
 
+        # Refresh cached analysis only when needed. This avoids running
+        # expensive minimax hint generation every render frame.
+        current_position_key = game.current_position_key()
+        if current_position_key != sidebar_position_key or training_mode != sidebar_training_mode:
+            sidebar_position_key = current_position_key
+            sidebar_training_mode = training_mode
+            sidebar_eval_score, sidebar_eval_quality = game.get_position_quality(game.current_turn)
+            sidebar_opening_info = game.detect_opening()
+            if training_mode and game.result is None:
+                sidebar_top_moves_color = game.current_turn
+                sidebar_top_moves = game.get_top_moves_minimax(game.current_turn, depth=TRAINING_HINT_DEPTH, top_n=3)
+            else:
+                sidebar_top_moves_color = game.current_turn
+                sidebar_top_moves = []
+
         draw_board(screen, selected_square, legal_targets)
         draw_pieces(screen, game, piece_font)
-        draw_sidebar(screen, game, ui_font, small_font, bot_difficulty, bot_depth, training_mode, last_move_quality)
+        draw_sidebar(
+            screen,
+            game,
+            ui_font,
+            small_font,
+            bot_difficulty,
+            bot_depth,
+            training_mode,
+            last_move_quality,
+            sidebar_eval_score,
+            sidebar_eval_quality,
+            sidebar_opening_info,
+            sidebar_top_moves,
+            sidebar_top_moves_color,
+        )
 
         pygame.display.flip()
         clock.tick(FPS)
