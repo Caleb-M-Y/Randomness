@@ -33,9 +33,9 @@ import pygame
 
 # Support both direct script execution and package-style imports.
 try:
-    from chess_game import ChessGame
+    from games.chess.chess_game import ChessGame
 except ImportError:
-    from games.chess_game import ChessGame
+    from games.chess.chess_game import ChessGame
 
 
 BOARD_SIZE = 8
