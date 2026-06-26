@@ -35,7 +35,7 @@ import pygame
 try:
     from games.chess.chess_game import ChessGame
 except ImportError:
-    from games.chess.chess_game import ChessGame
+    from chess_game import ChessGame
 
 
 BOARD_SIZE = 8

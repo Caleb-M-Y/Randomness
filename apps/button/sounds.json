@@ -1,0 +1,7 @@
+{
+  "sounds": [
+    {"id": "boing", "file": "boing.wav", "enabled": true},
+    {"id": "buzzer", "file": "buzzer.wav", "enabled": true},
+    {"id": "wow", "file": "wow.wav", "enabled": true}
+  ]
+}
