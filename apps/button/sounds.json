@@ -4,6 +4,11 @@
     {"id": "cigarette", "file": "cigarette.wav", "enabled": true},
     {"id": "fart", "file": "fart.wav", "enabled": true},
     {"id": "plant", "file": "plant.wav", "enabled": true},
-    {"id": "willy wig", "file": "willy_wig.wav", "enabled": true}
+    {"id": "willy wig", "file": "willy_wig.wav", "enabled": true},
+    {"id": "bomboclaat", "file": "bomboclaat.wav", "enabled": true},
+    {"id": "fun_beat_box", "file": "fun_beat_box.wav", "enabled": true},
+    {"id": "the_dore", "file": "the_dore.wav", "enabled": true},
+    {"id": "wheres_the_leak", "file": "wheres_the_leak.wav", "enabled": true},
+    {"id": "SHUTUP", "file": "shutup.wav", "enabled": true}
   ]
 }
