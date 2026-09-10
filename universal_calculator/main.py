@@ -6,16 +6,14 @@ from tkinter import ttk
 
 from area_volume import AreaVolumeCalculator
 from equations import AlgebraCalculator, CalculusCalculator, ConsoleIO, TkIO
-from kinematics import DynamicsCalculator, KinematicsCalculator, StaticsCalculator
+from physics import PhysicsCalculator
 
 
 class UniversalCalculatorApp:
 	def __init__(self) -> None:
 		self.calculators = [
+			PhysicsCalculator(),
 			AreaVolumeCalculator(),
-			KinematicsCalculator(),
-			StaticsCalculator(),
-			DynamicsCalculator(),
 			AlgebraCalculator(),
 			CalculusCalculator(),
 		]
@@ -24,12 +22,10 @@ class UniversalCalculatorApp:
 		io = ConsoleIO()
 		while True:
 			io.tell("\nUniversal Calculator")
-			io.tell("1. Area and volume")
-			io.tell("2. Kinematics")
-			io.tell("3. Statics")
-			io.tell("4. Dynamics")
-			io.tell("5. Algebra")
-			io.tell("6. Calculus")
+			io.tell("1. Physics (textbook sequence)")
+			io.tell("2. Area and volume")
+			io.tell("3. Algebra")
+			io.tell("4. Calculus")
 			io.tell("0. Quit")
 
 			selection = io.ask_text("Choose a topic")
@@ -46,10 +42,6 @@ class UniversalCalculatorApp:
 				self.calculators[2].run_cli(io)
 			elif selection == "4":
 				self.calculators[3].run_cli(io)
-			elif selection == "5":
-				self.calculators[4].run_cli(io)
-			elif selection == "6":
-				self.calculators[5].run_cli(io)
 			else:
 				io.error("Choose a valid topic.")
 
@@ -85,23 +77,21 @@ class UniversalCalculatorApp:
 
 		grid = ttk.Frame(outer)
 		grid.grid(row=1, column=0, sticky="nsew")
-		for index in range(3):
+		for index in range(2):
 			grid.columnconfigure(index, weight=1)
 		for index in range(2):
 			grid.rowconfigure(index, weight=1)
 
 		topic_buttons = [
-			("Area and Volume", self.calculators[0]),
-			("Kinematics", self.calculators[1]),
-			("Statics", self.calculators[2]),
-			("Dynamics", self.calculators[3]),
-			("Algebra", self.calculators[4]),
-			("Calculus", self.calculators[5]),
+			("Physics", self.calculators[0]),
+			("Area and Volume", self.calculators[1]),
+			("Algebra", self.calculators[2]),
+			("Calculus", self.calculators[3]),
 		]
 
 		for index, (label, calculator) in enumerate(topic_buttons):
-			row = index // 3
-			column = index % 3
+			row = index // 2
+			column = index % 2
 			card = ttk.Frame(grid, padding=16, relief="ridge")
 			card.grid(row=row, column=column, sticky="nsew", padx=8, pady=8)
 			card.columnconfigure(0, weight=1)
@@ -127,7 +117,7 @@ class UniversalCalculatorApp:
 		container = ttk.Frame(window, padding=14)
 		container.grid(sticky="nsew")
 		container.columnconfigure(0, weight=1)
-		container.rowconfigure(1, weight=1)
+		container.rowconfigure(2, weight=1)
 
 		ttk.Label(container, text=calculator.title, font=("Segoe UI", 18, "bold")).grid(row=0, column=0, sticky="w")
 
