@@ -46,3 +46,13 @@ If you switch between PC and laptop:
 3. Run `pip install -r games/requirements.txt`.
 
 Do not push `.venv312` changes. Virtual environments store absolute paths and are machine-specific.
+
+## Guitar Key Finder
+
+Explore major and natural-minor scales, their diatonic chords, and guitar fretboard positions:
+
+```powershell
+python apps/music_key_finder/music_key_finder.py
+```
+
+See [apps/music_key_finder/README.md](apps/music_key_finder/README.md) for details and tests. The app uses only the Python standard library.
